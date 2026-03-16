@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.git.backup-codex/
+.git.backup-codex/**
 .env
 .env.*
 
