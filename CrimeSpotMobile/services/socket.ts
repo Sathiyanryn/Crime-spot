@@ -31,7 +31,6 @@ export const connectSocket = async (): Promise<Socket | null> => {
 
   socket = io(SOCKET_URL, {
     auth: { token },
-    transports: ["websocket"],
     autoConnect: true,
   });
 

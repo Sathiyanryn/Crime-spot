@@ -4,8 +4,6 @@ import * as SecureStore from 'expo-secure-store';
 import axios from 'axios';
 import { API_ENDPOINTS } from '@/constants/api';
 
-const API_URL = API_ENDPOINTS.MOBILE_LOCATION.split('/api/mobile/location')[0];
-
 // Store for alert spam prevention
 const alertedZones: Map<string, number> = new Map();
 const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes - prevent spam notifications
@@ -43,6 +41,7 @@ const handleLocationUpdate = async (location: Location.LocationObject) => {
       {
         lat: location.coords.latitude,
         lng: location.coords.longitude,
+        timezone_offset_minutes: new Date().getTimezoneOffset(),
       },
       {
         headers: {

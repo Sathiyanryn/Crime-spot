@@ -4,7 +4,7 @@
  */
 
 // ⚙️ UPDATE THIS SINGLE URL FOR ALL NETWORK CHANGES
-export const BACKEND_URL = 'http://192.168.100.20:5000';
+export const BACKEND_URL = 'http://192.168.1.5:5000';
 
 // API Endpoints
 export const API_ENDPOINTS = {
@@ -14,6 +14,7 @@ export const API_ENDPOINTS = {
 
   // Location & Mobile
   MOBILE_LOCATION: `${BACKEND_URL}/api/mobile/location`,
+  MOBILE_SOS: `${BACKEND_URL}/api/mobile/sos`,
   UPDATE_LOCATION: `${BACKEND_URL}/api/location/update`,
   CHECK_LOCATION: `${BACKEND_URL}/api/check-location`,
 

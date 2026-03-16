@@ -1,4 +1,4 @@
-import eventlet
+﻿import eventlet
 eventlet.monkey_patch()
 
 from flask import Flask, request, jsonify
@@ -14,7 +14,6 @@ from flask_socketio import SocketIO, join_room
 from math import radians, sin, cos, sqrt, atan2
 import requests
 from bson import ObjectId
-
 
 
 # ---------------------- App Setup ----------------------
@@ -91,6 +90,88 @@ def role_required(roles):
 def generate_zone_key(lat, lng):
     return f"{round(lat, 5)}-{round(lng, 5)}"
 
+
+def get_local_time(current_time, timezone_offset_minutes=None):
+    """Convert UTC time into the client's local time when an offset is provided."""
+    if timezone_offset_minutes is None:
+        return current_time.astimezone()
+
+    try:
+        offset = int(timezone_offset_minutes)
+    except (TypeError, ValueError):
+        return current_time.astimezone()
+
+    # JS getTimezoneOffset returns UTC - local time in minutes.
+    return current_time - timedelta(minutes=offset)
+
+
+def get_time_risk_context(local_time):
+    """Return time-of-day context used for threat scoring."""
+    hour = local_time.hour
+
+    if hour >= 22 or hour < 5:
+        return {
+            'window': 'late_night',
+            'label': 'Late night risk window',
+            'multiplier': 1.45,
+            'color': '#dc2626',
+        }
+
+    if hour >= 19:
+        return {
+            'window': 'nightfall',
+            'label': 'Nightfall caution window',
+            'multiplier': 1.2,
+            'color': '#f97316',
+        }
+
+    if hour < 6:
+        return {
+            'window': 'early_morning',
+            'label': 'Early morning low-visibility window',
+            'multiplier': 1.15,
+            'color': '#f59e0b',
+        }
+
+    return {
+        'window': 'daytime',
+        'label': 'Daytime monitoring window',
+        'multiplier': 1.0,
+        'color': '#eab308',
+    }
+
+
+def get_crime_weight(crime_type):
+    """Assign a baseline risk weight by crime type."""
+    normalized = (crime_type or '').strip().lower()
+    severe = {'murder', 'rape', 'kidnapping', 'armed robbery', 'terrorism'}
+    high = {'assault', 'robbery', 'burglary', 'stalking', 'harassment'}
+
+    if normalized in severe:
+        return 1.0
+    if normalized in high:
+        return 0.82
+    return 0.64
+
+
+def classify_risk_level(score):
+    if score >= 85:
+        return 'critical'
+    if score >= 68:
+        return 'high'
+    if score >= 45:
+        return 'elevated'
+    return 'guarded'
+
+
+def risk_level_color(level):
+    return {
+        'critical': '#dc2626',
+        'high': '#f97316',
+        'elevated': '#f59e0b',
+        'guarded': '#facc15',
+    }.get(level, '#38bdf8')
+
 # ---------------------- Utility -----------------------
 def serialize_doc(doc):
     """Converts MongoDB ObjectIds and datetime fields to JSON-serializable format"""
@@ -148,6 +229,12 @@ def normalize_alert_doc(alert):
         'crime_lat': serialized.get('crime_lat') if serialized.get('crime_lat') is not None else payload.get('crime_lat'),
         'crime_lng': serialized.get('crime_lng') if serialized.get('crime_lng') is not None else payload.get('crime_lng'),
         'distance_km': serialized.get('distance_km') if serialized.get('distance_km') is not None else payload.get('distance_km', 0),
+        'severity': serialized.get('severity') or payload.get('severity'),
+        'risk_level': serialized.get('risk_level') or payload.get('risk_level'),
+        'risk_score': serialized.get('risk_score') if serialized.get('risk_score') is not None else payload.get('risk_score'),
+        'risk_color': serialized.get('risk_color') or payload.get('risk_color'),
+        'time_window': serialized.get('time_window') or payload.get('time_window'),
+        'time_label': serialized.get('time_label') or payload.get('time_label'),
         'detected_at': (
             serialized.get('detected_at')
             or payload.get('detected_at')
@@ -224,7 +311,7 @@ def check_crime_zone(user_lat, user_lng, current_time, radius_km=1.0):
                         'distance_km': round(distance_km, 3)
                     })
                 else:
-                    # Optionally, also notify during daytime — include below if desired.
+                    # Optionally, also notify during daytime â€” include below if desired.
                     notifications.append({
                         'location': crime.get('location') or f"{crime_lat},{crime_lng}",
                         'message': f'CRIME ZONE ALERT: {crime.get("type","")} detected nearby.',
@@ -235,6 +322,74 @@ def check_crime_zone(user_lat, user_lng, current_time, radius_km=1.0):
                         'severity': 'high' if crime.get('type') in ['Murder', 'Rape'] else 'medium'
                     })
 
+        except Exception as e:
+            print("Error checking crime entry:", e)
+            continue
+
+    return notifications
+
+
+def check_crime_zone(user_lat, user_lng, current_time, radius_km=1.0, timezone_offset_minutes=None):
+    """
+    Checks if user is within a high-crime zone (default radius_km kilometers).
+    Returns risk-enriched notifications for crimes within the radius.
+    """
+    crimes = list(crimes_col.find({}))
+    notifications = []
+    local_time = get_local_time(current_time, timezone_offset_minutes)
+    time_context = get_time_risk_context(local_time)
+
+    for crime in crimes:
+        try:
+            if 'lat' in crime and 'lng' in crime:
+                crime_lat = float(crime['lat'])
+                crime_lng = float(crime['lng'])
+            else:
+                loc = crime.get('location')
+                if isinstance(loc, dict) and 'coordinates' in loc:
+                    crime_lng = float(loc['coordinates'][0])
+                    crime_lat = float(loc['coordinates'][1])
+                else:
+                    continue
+
+            distance_km = haversine_km(user_lat, user_lng, crime_lat, crime_lng)
+            if distance_km > radius_km:
+                continue
+
+            proximity_score = max(0.0, 1 - (distance_km / radius_km))
+            risk_score = round(
+                min(
+                    99,
+                    (get_crime_weight(crime.get('type')) * 55 + proximity_score * 35)
+                    * time_context['multiplier']
+                )
+            )
+            risk_level = classify_risk_level(risk_score)
+
+            if time_context['window'] == 'daytime':
+                message = f'CRIME ZONE ALERT: {crime.get("type","")} detected nearby.'
+            else:
+                message = (
+                    f'{crime.get("type","Crime")} risk nearby during the '
+                    f'{time_context["label"].lower()}.'
+                )
+
+            notifications.append({
+                'location': crime.get('location') or f"{crime_lat},{crime_lng}",
+                'message': message,
+                'lat': crime_lat,
+                'lng': crime_lng,
+                'type': crime.get('type'),
+                'distance_km': round(distance_km, 3),
+                'severity': risk_level,
+                'risk_level': risk_level,
+                'risk_score': risk_score,
+                'risk_color': risk_level_color(risk_level),
+                'time_window': time_context['window'],
+                'time_label': time_context['label'],
+                'time_color': time_context['color'],
+                'detected_local_time': local_time.isoformat(),
+            })
         except Exception as e:
             print("Error checking crime entry:", e)
             continue
@@ -416,6 +571,7 @@ def add_crime(current_user):
     except:
         return jsonify({'message': 'lat and lng must be numbers'}), 400
 
+
     inserted = crimes_col.insert_one(data)
     created = crimes_col.find_one({'_id': inserted.inserted_id})
     return jsonify(serialize_doc(created)), 201
@@ -525,7 +681,6 @@ def update_location(current_user):
 
     current_time = datetime.now(timezone.utc)
 
-    # 🔹 Save user's last known location
     try:
         users_col.update_one(
             {'phone': current_user['phone']},
@@ -540,7 +695,6 @@ def update_location(current_user):
     except Exception as e:
         print("Failed to save last_location:", e)
 
-    # 🔹 Detect nearby crime zones
     alerts = check_crime_zone(
         user_lat,
         user_lng,
@@ -588,7 +742,6 @@ def update_location(current_user):
         'message': f'{len(created_alerts)} crime-zone alert(s) detected near your location.',
         'alerts': created_alerts
     }), 200
-
 # ---------------------- Mobile Location Update (SAFE ADDITION) ----------------------
 def get_nearest_patrols(user_lat, user_lng, limit=2, max_distance_km=10.0):
     """
@@ -641,6 +794,7 @@ def mobile_location_update(current_user):
     except Exception:
         return jsonify({'message': 'lat/lng must be numbers'}), 400
 
+
     # Save user's last known location
     users_col.update_one(
         {'phone': current_user['phone']},
@@ -655,7 +809,7 @@ def mobile_location_update(current_user):
 
     current_time = datetime.now(timezone.utc)
 
-    # 🔍 Use your existing crime detection logic
+    # ðŸ” Use your existing crime detection logic
     alerts = check_crime_zone(
         user_lat,
         user_lng,
@@ -663,7 +817,7 @@ def mobile_location_update(current_user):
         radius_km=1.0
     )
 
-    # If no alerts → user is safe
+    # If no alerts â†’ user is safe
     if not alerts:
         return jsonify({
             'alert': False,
@@ -678,7 +832,7 @@ def mobile_location_update(current_user):
         crime_lng = float(alert.get('lng'))
         zone_key = generate_zone_key(crime_lat, crime_lng)
 
-        # 🔎 CHECK: existing active alert for same user + same zone
+        # ðŸ”Ž CHECK: existing active alert for same user + same zone
         existing_alert = alerts_col.find_one({
             'phone': current_user['phone'],
             'zone_key': zone_key,
@@ -686,7 +840,7 @@ def mobile_location_update(current_user):
         })
 
         if existing_alert:
-            # ✅ UPDATE ONLY (NO NEW ALERT - prevent duplicates)
+            # âœ… UPDATE ONLY (NO NEW ALERT - prevent duplicates)
             alerts_col.update_one(
                 {'_id': existing_alert['_id']},
                 {'$set': {
@@ -698,7 +852,7 @@ def mobile_location_update(current_user):
                     'updated_at': current_time
                 }}
             )
-            # 📡 Emit UPDATE (not new alert)
+            # ðŸ“¡ Emit UPDATE (not new alert)
             socketio.emit('crime_zone_alert_updated', {
                 '_id': str(existing_alert['_id']),
                 'user_lat': user_lat,
@@ -708,7 +862,7 @@ def mobile_location_update(current_user):
             }, room='patrols')
             continue
 
-        # 🆕 FIRST TIME ALERT FOR THIS ZONE
+        # ðŸ†• FIRST TIME ALERT FOR THIS ZONE
         alert_id = ObjectId()
 
         payload = {
@@ -729,7 +883,7 @@ def mobile_location_update(current_user):
             'zone_key': zone_key
         }
 
-        # 💾 Store alert ONCE
+        # ðŸ’¾ Store alert ONCE
         alerts_col.insert_one({
             '_id': alert_id,
             'type': 'mobile_auto_detection',
@@ -737,16 +891,117 @@ def mobile_location_update(current_user):
             'created_at': current_time
         })
 
-        # 📡 Emit socket ONLY ONCE for new alerts
+        # ðŸ“¡ Emit socket ONLY ONCE for new alerts
         socketio.emit('crime_zone_alert', {'_id': str(alert_id), **payload}, room='patrols')
         created_alerts_count += 1
 
-    # 📱 Response used by USER app for popup
+    # ðŸ“± Response used by USER app for popup
     return jsonify({
         'alert': True,
         'message': f'{len(alerts)} crime risk(s) detected near you',
         'alerts': alerts
     }), 200
+
+
+@app.route('/api/mobile/sos', methods=['POST'])
+@token_required
+def mobile_sos_alert(current_user):
+    """Create a high-priority SOS incident from the mobile app."""
+    data = request.get_json() or {}
+
+    if 'lat' not in data or 'lng' not in data:
+        return jsonify({'message': 'lat and lng required'}), 400
+
+    try:
+        user_lat = float(data['lat'])
+        user_lng = float(data['lng'])
+    except Exception:
+        return jsonify({'message': 'lat/lng must be numbers'}), 400
+
+
+    current_time = datetime.now(timezone.utc)
+    actor = actor_identity(current_user)
+    location_label = data.get('location') or f"{round(user_lat, 5)}, {round(user_lng, 5)}"
+    recent_threshold = current_time - timedelta(minutes=2)
+
+    existing_alert = alerts_col.find_one({
+        'type': 'mobile_sos',
+        'user': actor,
+        'status': 'active',
+        'created_at': {'$gte': recent_threshold}
+    })
+
+    payload = {
+        'type': 'mobile_sos',
+        'user': actor,
+        'phone': current_user.get('phone'),
+        'user_name': current_user.get('name'),
+        'aadhar': current_user.get('aadhar'),
+        'crime_type': 'SOS Emergency',
+        'location': location_label,
+        'message': data.get('message') or 'User requested emergency patrol assistance from the mobile app.',
+        'user_lat': user_lat,
+        'user_lng': user_lng,
+        'crime_lat': user_lat,
+        'crime_lng': user_lng,
+        'distance_km': 0,
+        'severity': 'critical',
+        'risk_level': 'critical',
+        'risk_score': 99,
+        'risk_color': '#dc2626',
+        'time_window': 'manual_sos',
+        'time_label': 'Manual SOS dispatch',
+        'detected_at': current_time.isoformat(),
+        'status': 'active',
+        'reported_by': actor,
+    }
+
+    users_col.update_one(
+        {'phone': current_user['phone']},
+        {'$set': {
+            'last_location': {
+                'lat': user_lat,
+                'lng': user_lng,
+                'updated_at': current_time.isoformat()
+            }
+        }}
+    )
+
+    if existing_alert:
+        alerts_col.update_one(
+            {'_id': existing_alert['_id']},
+            {'$set': {**payload, 'updated_at': current_time}}
+        )
+
+        socketio.emit('crime_zone_alert_updated', {
+            '_id': str(existing_alert['_id']),
+            **payload,
+            'updated_at': current_time.isoformat()
+        }, room='patrols')
+        socketio.emit('crime_zone_alert_updated', {
+            '_id': str(existing_alert['_id']),
+            **payload,
+            'updated_at': current_time.isoformat()
+        }, room='admins')
+
+        return jsonify({
+            'message': 'SOS refreshed successfully',
+            'alert_id': str(existing_alert['_id'])
+        }), 200
+
+    inserted = alerts_col.insert_one({
+        **payload,
+        'created_at': current_time
+    })
+
+    safe_alert = {'_id': str(inserted.inserted_id), **payload}
+    socketio.emit('crime_zone_alert', safe_alert, room='patrols')
+    socketio.emit('crime_zone_alert', safe_alert, room='admins')
+
+    return jsonify({
+        'message': 'SOS sent successfully',
+        'alert_id': str(inserted.inserted_id)
+    }), 201
 
 
 # --------- User alert to patrol ----------

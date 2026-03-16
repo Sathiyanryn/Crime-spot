@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Linking } from 'react-native';
+import { AppTheme } from '@/constants/theme';
 
 type MarkerTone = 'red' | 'blue' | 'green' | 'yellow';
 
@@ -25,10 +26,10 @@ try {
 }
 
 const toneToHex = (tone: MarkerTone) => {
-  if (tone === 'blue') return '#38bdf8';
-  if (tone === 'green') return '#22c55e';
-  if (tone === 'yellow') return '#facc15';
-  return '#f97316';
+  if (tone === 'blue') return AppTheme.colors.mapUser;
+  if (tone === 'green') return AppTheme.colors.mapPatrol;
+  if (tone === 'yellow') return AppTheme.colors.crimeLow;
+  return AppTheme.colors.mapCrime;
 };
 
 const openExternalMap = async (markers: MapMarker[]) => {
@@ -83,10 +84,12 @@ const buildLeafletHtml = (markers: MapMarker[]) => {
         padding: 0;
         width: 100%;
         height: 100%;
-        background: #020617;
+        background: #06111f;
       }
       .leaflet-container {
-        background: #020617;
+        background:
+          radial-gradient(circle at top, rgba(38,198,218,0.18), transparent 45%),
+          linear-gradient(180deg, #0a1628 0%, #06111f 100%);
         font-family: sans-serif;
       }
       .leaflet-control-attribution {
@@ -96,8 +99,8 @@ const buildLeafletHtml = (markers: MapMarker[]) => {
         width: 16px;
         height: 16px;
         border-radius: 999px;
-        border: 3px solid #e2e8f0;
-        box-shadow: 0 0 0 4px rgba(15, 23, 42, 0.35);
+        border: 3px solid #f8fbff;
+        box-shadow: 0 0 0 5px rgba(6, 17, 31, 0.5);
       }
     </style>
   </head>
@@ -153,7 +156,7 @@ export default function DashboardMapCard({ title, subtitle, markers }: Dashboard
     <View style={styles.card}>
       <View style={styles.header}>
         <View style={styles.headerText}>
-          <Text style={styles.eyebrow}>OpenStreetMap</Text>
+          <Text style={styles.eyebrow}>Risk Overlay</Text>
           <Text style={styles.title}>{title}</Text>
           {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
         </View>
@@ -178,13 +181,13 @@ export default function DashboardMapCard({ title, subtitle, markers }: Dashboard
           <View style={styles.emptyState}>
             <Text style={styles.emptyTitle}>Embedded map unavailable</Text>
             <Text style={styles.emptySubtitle}>
-              This Android development build does not include WebView yet. Use Open to launch the map externally.
+              Open the map externally to review the active safety overlay.
             </Text>
           </View>
         ) : (
           <View style={styles.emptyState}>
             <Text style={styles.emptyTitle}>Waiting for coordinates</Text>
-            <Text style={styles.emptySubtitle}>Locations will appear here once the dashboard has live points.</Text>
+            <Text style={styles.emptySubtitle}>Live positions will appear here once the dashboard has active data.</Text>
           </View>
         )}
       </View>
@@ -219,11 +222,11 @@ export default function DashboardMapCard({ title, subtitle, markers }: Dashboard
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: '#0b1220',
-    borderRadius: 20,
+    backgroundColor: AppTheme.colors.surface,
+    borderRadius: AppTheme.radii.lg,
     padding: 16,
     borderWidth: 1,
-    borderColor: '#1e293b',
+    borderColor: AppTheme.colors.border,
     marginBottom: 16,
     overflow: 'hidden',
   },
@@ -238,7 +241,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   eyebrow: {
-    color: '#38bdf8',
+    color: AppTheme.colors.primary,
     fontSize: 11,
     fontWeight: '700',
     textTransform: 'uppercase',
@@ -246,18 +249,18 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   title: {
-    color: '#f8fafc',
+    color: AppTheme.colors.textPrimary,
     fontSize: 18,
     fontWeight: '800',
   },
   subtitle: {
-    color: '#94a3b8',
+    color: AppTheme.colors.textSecondary,
     fontSize: 12,
     marginTop: 4,
   },
   actionButton: {
-    backgroundColor: '#0ea5e9',
-    borderRadius: 999,
+    backgroundColor: AppTheme.colors.primaryDeep,
+    borderRadius: AppTheme.radii.pill,
     paddingHorizontal: 14,
     paddingVertical: 9,
   },
@@ -271,12 +274,12 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: '#1e293b',
-    backgroundColor: '#020617',
+    borderColor: AppTheme.colors.border,
+    backgroundColor: AppTheme.colors.background,
   },
   webview: {
     flex: 1,
-    backgroundColor: '#020617',
+    backgroundColor: AppTheme.colors.background,
   },
   emptyState: {
     flex: 1,
@@ -285,13 +288,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   emptyTitle: {
-    color: '#cbd5e1',
+    color: AppTheme.colors.textSecondary,
     fontSize: 16,
     fontWeight: '700',
     marginBottom: 6,
   },
   emptySubtitle: {
-    color: '#64748b',
+    color: AppTheme.colors.textMuted,
     fontSize: 12,
     textAlign: 'center',
     lineHeight: 18,
@@ -303,20 +306,20 @@ const styles = StyleSheet.create({
   },
   summaryPill: {
     flex: 1,
-    backgroundColor: '#111827',
+    backgroundColor: AppTheme.colors.backgroundAlt,
     borderRadius: 14,
     padding: 12,
     borderWidth: 1,
-    borderColor: '#1f2937',
+    borderColor: AppTheme.colors.border,
   },
   summaryLabel: {
-    color: '#64748b',
+    color: AppTheme.colors.textMuted,
     fontSize: 11,
     textTransform: 'uppercase',
     marginBottom: 4,
   },
   summaryValue: {
-    color: '#e2e8f0',
+    color: AppTheme.colors.textPrimary,
     fontSize: 14,
     fontWeight: '700',
   },
@@ -335,12 +338,12 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   legendText: {
-    color: '#cbd5e1',
+    color: AppTheme.colors.textSecondary,
     fontSize: 12,
     flex: 1,
   },
   moreText: {
-    color: '#64748b',
+    color: AppTheme.colors.textMuted,
     fontSize: 12,
   },
 });

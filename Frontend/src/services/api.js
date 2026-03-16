@@ -1,19 +1,33 @@
-// src/services/api.js
-import axios from 'axios'
-import { getToken } from './auth'
+import axios from 'axios';
+import { getToken, logout } from './auth';
+
+export const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5000';
 
 const API = axios.create({
-  baseURL: 'http://localhost:5000', // backend
-  timeout: 10000,
-})
+  baseURL: API_BASE_URL,
+  timeout: 15000,
+});
 
-// attach token automatically
 API.interceptors.request.use((config) => {
-  const token = getToken()
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
-  return config
-})
+  const token = getToken();
 
-export default API
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+
+  return config;
+});
+
+API.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error?.response?.status === 401) {
+      logout();
+    }
+
+    return Promise.reject(error);
+  }
+);
+
+export default API;

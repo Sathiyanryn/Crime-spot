@@ -32,7 +32,7 @@ export default function Login() {
       const endpoint = isLogin ? '/login' : '/register';
       const payload = isLogin 
         ? { phone, password }
-        : { phone, password, aadhar, name, role };
+        : { phone, password, aadhar, name };
 
       const response = await axios.post(`${BACKEND_URL}${endpoint}`, payload);
       
