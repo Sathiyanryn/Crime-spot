@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Linking, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Linking, TouchableOpacity, Alert as RNAlert } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { io, Socket } from 'socket.io-client';
 import axios from 'axios';
@@ -29,6 +30,9 @@ interface Alert {
   risk_level?: string;
   risk_score?: number;
   time_label?: string;
+  assigned_to?: string;
+  patrol_status?: string;
+  patrol_eta_minutes?: number;
 }
 
 let globalSocket: Socket | null = null;
@@ -37,11 +41,58 @@ export default function PatrolDashboard() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [connected, setConnected] = useState(false);
   const [phone, setPhone] = useState('');
+  const [updatingStatus, setUpdatingStatus] = useState<{ [key: string]: boolean }>({});
   const router = useRouter();
   const socketRef = useRef<Socket | null>(null);
+  const locationIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Send location every 30 seconds
+  const startLocationTracking = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        console.warn('Location permission denied');
+        return;
+      }
+
+      const sendLocation = async () => {
+        try {
+          const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+          const token = await SecureStore.getItemAsync('token');
+          
+          if (token) {
+            await axios.put(
+              `${BACKEND_URL}/api/patrols/location`,
+              {
+                lat: location.coords.latitude,
+                lng: location.coords.longitude,
+              },
+              {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                },
+              }
+            );
+          }
+        } catch (error) {
+          console.error('Error sending location:', error);
+        }
+      };
+
+      // Send immediately
+      await sendLocation();
+
+      // Then every 30 seconds
+      locationIntervalRef.current = setInterval(sendLocation, 30000);
+    } catch (error) {
+      console.error('Location tracking error:', error);
+    }
+  };
 
   useEffect(() => {
     initializePatrol();
+    startLocationTracking();
 
     const refreshInterval = setInterval(async () => {
       const token = await SecureStore.getItemAsync('token');
@@ -52,6 +103,7 @@ export default function PatrolDashboard() {
 
     return () => {
       clearInterval(refreshInterval);
+      if (locationIntervalRef.current) clearInterval(locationIntervalRef.current);
       if (socketRef.current?.connected) {
         socketRef.current.disconnect();
       }
@@ -105,6 +157,8 @@ export default function PatrolDashboard() {
   const setupSocketListeners = (socket: Socket) => {
     socket.off('crime_zone_alert');
     socket.off('crime_zone_alert_updated');
+    socket.off('alert_assigned_to_you');
+    socket.off('alert_status_updated');
     socket.off('alert_handled');
     socket.off('alert_deleted');
 
@@ -117,6 +171,35 @@ export default function PatrolDashboard() {
 
     socket.on('crime_zone_alert_updated', (data: Alert) => {
       setAlerts((prev) => prev.map((alert) => (alert._id === data._id ? { ...alert, ...data } : alert)));
+    });
+
+    socket.on('alert_assigned_to_you', (data: any) => {
+      setAlerts((prev) => {
+        const exists = prev.some((a) => a._id === data.alert_id);
+        if (exists) {
+          return prev.map((alert) =>
+            alert._id === data.alert_id
+              ? {
+                  ...alert,
+                  assigned_to: phone,
+                  patrol_status: 'assigned',
+                  patrol_eta_minutes: data.eta_minutes,
+                }
+              : alert
+          );
+        }
+        return prev;
+      });
+    });
+
+    socket.on('alert_status_updated', (data: any) => {
+      setAlerts((prev) =>
+        prev.map((alert) =>
+          alert._id === data.alert_id
+            ? { ...alert, patrol_status: data.patrol_status, status: data.status }
+            : alert
+        )
+      );
     });
 
     socket.on('alert_handled', (data: { alert_id: string }) => {
@@ -184,6 +267,51 @@ export default function PatrolDashboard() {
     if (sanitizedNumber) {
       Linking.openURL(`tel:${sanitizedNumber}`);
     }
+  };
+
+  const handleStatusUpdate = async (alertId: string, newStatus: string) => {
+    try {
+      setUpdatingStatus((prev) => ({ ...prev, [alertId]: true }));
+      const token = await SecureStore.getItemAsync('token');
+
+      if (!token) {
+        router.replace('/login');
+        return;
+      }
+
+      await axios.put(
+        `${BACKEND_URL}/api/alerts/${alertId}/status`,
+        { patrol_status: newStatus },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      setAlerts((prev) =>
+        prev.map((alert) =>
+          alert._id === alertId ? { ...alert, patrol_status: newStatus } : alert
+        )
+      );
+    } catch (error) {
+      console.error('Error updating status:', error);
+      RNAlert.alert('Error', 'Failed to update status');
+    } finally {
+      setUpdatingStatus((prev) => ({ ...prev, [alertId]: false }));
+    }
+  };
+
+  const getStatusColor = (status?: string) => {
+    const colors: { [key: string]: string } = {
+      assigned: '#3b82f6',
+      on_way: '#f59e0b',
+      checking: '#8b5cf6',
+      in_progress: '#ef4444',
+      resolved: '#10b981',
+    };
+    return colors[status || ''] || '#6b7280';
   };
 
   const handleLogout = async () => {
@@ -291,6 +419,13 @@ export default function PatrolDashboard() {
                 <Text style={styles.alertLocation}>{alert.location}</Text>
                 <Text style={styles.alertMeta}>{alert.time_label || 'Live detection'} • {severity.toUpperCase()}</Text>
 
+                {alert.assigned_to && (
+                  <View style={styles.assignmentInfo}>
+                    <Text style={styles.assignmentText}>Assigned: <Text style={{ fontWeight: 'bold' }}>{alert.assigned_to}</Text></Text>
+                    {alert.patrol_eta_minutes && <Text style={styles.assignmentText}>ETA: {alert.patrol_eta_minutes} min</Text>}
+                  </View>
+                )}
+
                 <View style={styles.coordsRow}>
                   <View style={styles.coordCard}>
                     <Text style={styles.coordLabel}>User</Text>
@@ -301,6 +436,34 @@ export default function PatrolDashboard() {
                     <Text style={styles.coordValue}>{alert.crime_lat?.toFixed(4)}, {alert.crime_lng?.toFixed(4)}</Text>
                   </View>
                 </View>
+
+                {alert.assigned_to === phone && alert.patrol_status && (
+                  <View style={styles.statusContainer}>
+                    <Text style={styles.statusLabel}>Status: <Text style={{ color: getStatusColor(alert.patrol_status), fontWeight: 'bold' }}>{alert.patrol_status}</Text></Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.statusButtonsRow}>
+                      {['assigned', 'on_way', 'checking', 'in_progress', 'resolved'].map((status) => (
+                        <TouchableOpacity
+                          key={status}
+                          style={[
+                            styles.statusButton,
+                            {
+                              backgroundColor: alert.patrol_status === status ? getStatusColor(status) : AppTheme.colors.backgroundAlt,
+                            },
+                          ]}
+                          onPress={() => handleStatusUpdate(alert._id, status)}
+                          disabled={updatingStatus[alert._id]}
+                        >
+                          <Text style={[
+                            styles.statusButtonText,
+                            { color: alert.patrol_status === status ? 'white' : AppTheme.colors.textPrimary }
+                          ]}>
+                            {status.replace('_', ' ')}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
 
                 <View style={styles.actionRow}>
                   <TouchableOpacity style={styles.primaryButton} onPress={() => handleNavigate(alert.user_lat, alert.user_lng)}>
@@ -540,6 +703,43 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '800',
     fontSize: 13,
+  },
+  assignmentInfo: {
+    backgroundColor: AppTheme.colors.backgroundAlt,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 10,
+    borderLeftWidth: 3,
+    borderLeftColor: AppTheme.colors.primary,
+    borderRadius: 6,
+  },
+  assignmentText: {
+    fontSize: 12,
+    color: AppTheme.colors.textPrimary,
+    marginBottom: 4,
+    fontWeight: '600',
+  },
+  statusContainer: {
+    marginTop: 10,
+  },
+  statusButtonsRow: {
+    marginBottom: 10,
+  },
+  statusButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginRight: 8,
+    minWidth: 80,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: AppTheme.colors.border,
+  },
+  statusButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'capitalize',
   },
   footer: {
     padding: 14,

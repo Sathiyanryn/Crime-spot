@@ -1,12 +1,10 @@
-﻿import eventlet
-eventlet.monkey_patch()
-
-from flask import Flask, request, jsonify
+﻿from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pymongo import MongoClient
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import json
+import os
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -16,9 +14,17 @@ import requests
 from bson import ObjectId
 
 
+
 # ---------------------- App Setup ----------------------
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'supersecretjwtkey'  
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'development').lower()
+DEFAULT_SECRET_KEY = 'dev-only-change-me'
+DEFAULT_MONGO_URI = 'mongodb+srv://poseidon2005:Sathiya007@crime-cluster.qmgnmfw.mongodb.net/CrimeSpot?retryWrites=true&w=majority&appName=crime-cluster'
+
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', DEFAULT_SECRET_KEY)
+
+if ENVIRONMENT == 'production' and app.config['SECRET_KEY'] == DEFAULT_SECRET_KEY:
+    raise RuntimeError('SECRET_KEY must be set in production')
 
 # Allow the frontend origins
 CORS(app, supports_credentials=True)
@@ -26,12 +32,18 @@ CORS(app, supports_credentials=True)
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
-    async_mode="eventlet"
+    async_mode=os.getenv('SOCKETIO_ASYNC_MODE', 'eventlet')
 )
 
-# ---------------------- MongoDB ------------------------
-MONGO_URI = "mongodb+srv://poseidon2005:Sathiya007@crime-cluster.qmgnmfw.mongodb.net/?retryWrites=true&w=majority&appName=crime-cluster"
-client = MongoClient(MONGO_URI, tls=True)
+# ---------------------- MongoDB Atlas ----------------------
+MONGO_URI = os.getenv(
+    'MONGO_URI',
+    DEFAULT_MONGO_URI
+)
+if ENVIRONMENT == 'production' and MONGO_URI == DEFAULT_MONGO_URI:
+    raise RuntimeError('MONGO_URI must be set in production')
+
+client = MongoClient(MONGO_URI)
 db = client['CrimeSpot']
 
 users_col = db['users']
@@ -245,6 +257,12 @@ def normalize_alert_doc(alert):
         'reported_by': serialized.get('reported_by'),
         'handled_by': serialized.get('handled_by'),
         'handled_at': serialized.get('handled_at'),
+        'assigned_to': serialized.get('assigned_to'),
+        'assigned_at': serialized.get('assigned_at'),
+        'patrol_status': serialized.get('patrol_status'),
+        'patrol_eta_minutes': serialized.get('patrol_eta_minutes'),
+        'distance_to_assigned_patrol_km': serialized.get('distance_to_assigned_patrol_km'),
+        'assignment_history': serialized.get('assignment_history', []),
         'created_at': serialized.get('created_at'),
     }
 
@@ -400,7 +418,7 @@ def check_crime_zone(user_lat, user_lng, current_time, radius_km=1.0, timezone_o
 # ---------------------- Routes ------------------------
 @app.route('/')
 def index():
-    return jsonify({'message': '🚨 CrimeSpot Backend Running Successfully!'})
+    return jsonify({'message': 'ðŸš¨ CrimeSpot Backend Running Successfully!'})
 
 
 # --------- Register/Login ----------
@@ -600,6 +618,15 @@ def update_crime(current_user, crime_id):
             except Exception:
                 return jsonify({'message': f'{field} must be a number'}), 400
 
+    if 'lat' in updates or 'lng' in updates:
+        next_lat = updates.get('lat')
+        next_lng = updates.get('lng')
+        existing_crime = crimes_col.find_one({'_id': crime_obj_id})
+        if existing_crime is None:
+            return jsonify({'message': 'Crime not found'}), 404
+        lat_value = next_lat if next_lat is not None else float(existing_crime.get('lat'))
+        lng_value = next_lng if next_lng is not None else float(existing_crime.get('lng'))
+
     if not updates:
         return jsonify({'message': 'No valid fields provided'}), 400
 
@@ -643,13 +670,21 @@ def check_location(current_user):
     except:
         return jsonify({'message': 'Invalid coordinates'}), 400
 
+
     current_time = datetime.now(timezone.utc)
-    alerts = check_crime_zone(user_lat, user_lng, current_time, radius_km=1.0)
+    alerts = check_crime_zone(
+        user_lat,
+        user_lng,
+        current_time,
+        radius_km=1.0,
+        timezone_offset_minutes=data.get('timezone_offset_minutes')
+    )
 
-    # No socket emit here - alerts are handled in /api/location/update endpoint only
-
-    # Include debug info: distances included in alerts
-    return jsonify({'alerts': alerts})
+    return jsonify({
+        'alert': len(alerts) > 0,
+        'mode': 'preview_only',
+        'alerts': alerts
+    })
 
 
 # --------- User location update (new) ----------
@@ -657,16 +692,14 @@ def check_location(current_user):
 @token_required
 def update_location(current_user):
     """
-    Used after login to:
-    - Save user's last location
-    - Detect nearby crime zones
-    - Create DB-backed alerts
-    - Emit alerts to patrols with valid _id
+    Web-safe location preview endpoint.
+    - Saves user's last location
+    - Detects nearby crime zones
+    - Does not create patrol alerts
     """
 
     data = request.get_json() or {}
 
-    # Accept both lat/lng and latitude/longitude
     lat_key = 'lat' if 'lat' in data else ('latitude' if 'latitude' in data else None)
     lng_key = 'lng' if 'lng' in data else ('longitude' if 'longitude' in data else None)
 
@@ -679,7 +712,9 @@ def update_location(current_user):
     except (ValueError, TypeError):
         return jsonify({'message': 'Invalid coordinates'}), 400
 
+
     current_time = datetime.now(timezone.utc)
+    timezone_offset_minutes = data.get('timezone_offset_minutes')
 
     try:
         users_col.update_one(
@@ -699,50 +734,126 @@ def update_location(current_user):
         user_lat,
         user_lng,
         current_time,
-        radius_km=1.0
+        radius_km=1.0,
+        timezone_offset_minutes=timezone_offset_minutes
     )
 
-    created_alerts = []
-
-    # 🔹 Create DB-backed alerts and emit
-    for alert in alerts:
-        alert_id = ObjectId()
-
-        payload = {
-            'user': current_user['phone'],
-            'user_role': current_user.get('role'),
-            'crime_type': alert.get('type'),
-            'location': alert.get('location'),
-            'message': alert.get('message'),
-            'user_lat': user_lat,
-            'user_lng': user_lng,
-            'crime_lat': float(alert.get('lat')),
-            'crime_lng': float(alert.get('lng')),
-            'distance_km': alert.get('distance_km'),
-            'detected_at': current_time.isoformat(),
-            'status': 'active',
-            'assigned_patrols': []
-        }
-
-        # ✅ 1. Insert into MongoDB FIRST
-        alerts_col.insert_one({
-            '_id': alert_id,
-            'type': 'auto_crime_zone_detection',
-            **payload,
-            'created_at': current_time
-        })
-
-        # ✅ 2. Emit SAME payload to patrols
-        socketio.emit('crime_zone_alert', {'_id': str(alert_id), **payload}, room='patrols')
-
-        created_alerts.append({'_id': str(alert_id), **payload})
-
     return jsonify({
-        'alert': len(created_alerts) > 0,
-        'message': f'{len(created_alerts)} crime-zone alert(s) detected near your location.',
-        'alerts': created_alerts
+        'alert': len(alerts) > 0,
+        'mode': 'preview_only',
+        'message': f'{len(alerts)} crime-zone risk(s) detected near your location.',
+        'alerts': alerts
     }), 200
 # ---------------------- Mobile Location Update (SAFE ADDITION) ----------------------
+def find_nearest_available_patrol(crime_lat, crime_lng, radius_km=5.0):
+    """
+    Find the nearest AVAILABLE patrol officer within radius_km.
+    Returns patrol document or None.
+    """
+    patrols = users_col.find({
+        'role': 'patrol',
+        'last_location': {'$exists': True},
+        'patrol_status': {'$in': ['available', None]}
+    })
+    
+    closest_patrol = None
+    closest_distance = radius_km + 1  # Start with distance outside radius
+    
+    for patrol in patrols:
+        try:
+            patrol_lat = float(patrol['last_location']['lat'])
+            patrol_lng = float(patrol['last_location']['lng'])
+            distance = haversine_km(crime_lat, crime_lng, patrol_lat, patrol_lng)
+            
+            if distance <= radius_km and distance < closest_distance:
+                closest_patrol = patrol
+                closest_distance = distance
+        except Exception as e:
+            print(f"Error calculating patrol distance: {e}")
+            continue
+    
+    return closest_patrol, closest_distance if closest_patrol else None
+
+
+def auto_assign_alert(alert_id, alert_doc):
+    """
+    Auto-assign an alert to the nearest available patrol within 5km.
+    Updates alert with assignment info and notifies patrol via socket.
+    """
+    crime_lat = alert_doc.get('crime_lat')
+    crime_lng = alert_doc.get('crime_lng')
+    
+    if not crime_lat or not crime_lng:
+        print(f"Alert {alert_id} missing location - cannot auto-assign")
+        return False
+    
+    patrol, distance = find_nearest_available_patrol(crime_lat, crime_lng, radius_km=5.0)
+    
+    if not patrol:
+        print(f"No available patrol found within 5km for alert {alert_id}")
+        return False
+    
+    current_time = datetime.now(timezone.utc)
+    patrol_phone = patrol.get('phone')
+    eta_minutes = int(distance * 3)  # Rough estimate: 3 min per km
+    
+    # Update alert with assignment info
+    assignment_record = {
+        'patrol_phone': patrol_phone,
+        'assigned_at': current_time.isoformat(),
+        'assigned_by': 'system',
+        'distance_km': round(distance, 2),
+        'reason': 'auto_assigned_by_proximity'
+    }
+    
+    alerts_col.update_one(
+        {'_id': alert_id},
+        {'$set': {
+            'assigned_to': patrol_phone,
+            'assigned_at': current_time.isoformat(),
+            'patrol_status': 'assigned',
+            'patrol_eta_minutes': eta_minutes,
+            'distance_to_assigned_patrol_km': round(distance, 2)
+        },
+        '$push': {
+            'assignment_history': assignment_record
+        }}
+    )
+    
+    # Update patrol status to on_alert
+    users_col.update_one(
+        {'phone': patrol_phone},
+        {'$set': {
+            'patrol_status': 'on_alert',
+            'current_alert_id': str(alert_id)
+        }}
+    )
+    
+    # Notify patrol via socket
+    socketio.emit('alert_assigned_to_you', {
+        'alert_id': str(alert_id),
+        'crime_type': alert_doc.get('crime_type'),
+        'location': alert_doc.get('location'),
+        'message': alert_doc.get('message'),
+        'crime_lat': crime_lat,
+        'crime_lng': crime_lng,
+        'distance_km': round(distance, 2),
+        'eta_minutes': eta_minutes,
+        'assigned_at': current_time.isoformat()
+    }, room=f'patrol_{patrol_phone}')
+    
+    # Notify admins of auto-assignment
+    socketio.emit('alert_auto_assigned', {
+        'alert_id': str(alert_id),
+        'patrol_phone': patrol_phone,
+        'distance_km': round(distance, 2),
+        'eta_minutes': eta_minutes,
+        'assigned_at': current_time.isoformat()
+    }, room='admins')
+    
+    return True
+
+
 def get_nearest_patrols(user_lat, user_lng, limit=2, max_distance_km=10.0):
     """
     Find the nearest patrol officers based on their last known location.
@@ -808,13 +919,15 @@ def mobile_location_update(current_user):
     )
 
     current_time = datetime.now(timezone.utc)
+    timezone_offset_minutes = data.get('timezone_offset_minutes')
 
     # ðŸ” Use your existing crime detection logic
     alerts = check_crime_zone(
         user_lat,
         user_lng,
         current_time,
-        radius_km=1.0
+        radius_km=1.0,
+        timezone_offset_minutes=timezone_offset_minutes
     )
 
     # If no alerts â†’ user is safe
@@ -848,6 +961,12 @@ def mobile_location_update(current_user):
                     'user_lng': user_lng,
                     'user_name': current_user.get('name'),
                     'distance_km': alert.get('distance_km'),
+                    'severity': alert.get('severity'),
+                    'risk_level': alert.get('risk_level'),
+                    'risk_score': alert.get('risk_score'),
+                    'risk_color': alert.get('risk_color'),
+                    'time_window': alert.get('time_window'),
+                    'time_label': alert.get('time_label'),
                     'detected_at': current_time.isoformat(),
                     'updated_at': current_time
                 }}
@@ -858,6 +977,13 @@ def mobile_location_update(current_user):
                 'user_lat': user_lat,
                 'user_lng': user_lng,
                 'distance_km': alert.get('distance_km'),
+                'severity': alert.get('severity'),
+                'risk_level': alert.get('risk_level'),
+                'risk_score': alert.get('risk_score'),
+                'risk_color': alert.get('risk_color'),
+                'time_window': alert.get('time_window'),
+                'time_label': alert.get('time_label'),
+                'detected_at': current_time.isoformat(),
                 'updated_at': current_time.isoformat()
             }, room='patrols')
             continue
@@ -878,6 +1004,12 @@ def mobile_location_update(current_user):
             'crime_lat': crime_lat,
             'crime_lng': crime_lng,
             'distance_km': alert.get('distance_km'),
+            'severity': alert.get('severity'),
+            'risk_level': alert.get('risk_level'),
+            'risk_score': alert.get('risk_score'),
+            'risk_color': alert.get('risk_color'),
+            'time_window': alert.get('time_window'),
+            'time_label': alert.get('time_label'),
             'detected_at': current_time.isoformat(),
             'status': 'active',
             'zone_key': zone_key
@@ -1100,11 +1232,16 @@ def create_alert(current_user):
         'status': data.get('status', 'active'),
         'reported_by': actor,
         'detected_at': data.get('detected_at', current_time.isoformat()),
-        'created_at': current_time.isoformat()
+        'created_at': current_time.isoformat(),
+        'assignment_history': []
     }
 
     inserted = alerts_col.insert_one(alert_doc)
     created = alerts_col.find_one({'_id': inserted.inserted_id})
+    
+    # Try to auto-assign to nearest patrol
+    auto_assign_alert(inserted.inserted_id, alert_doc)
+    
     safe_alert = normalize_alert_doc(created)
     socketio.emit('crime_zone_alert', safe_alert, room='patrols')
     socketio.emit('crime_zone_alert', safe_alert, room='admins')
@@ -1251,6 +1388,243 @@ def delete_alert(current_user, alert_id):
         return jsonify({'message': f'Error deleting alert: {str(e)}'}), 500
 
 
+# --------- FEATURE 1: Patrol Location Update ----------
+@app.route('/api/patrols/location', methods=['PUT'])
+@token_required
+@role_required(['patrol'])
+def update_patrol_location(current_user):
+    """
+    Patrol sends their current location every 30 seconds.
+    Updates last_location in users collection.
+    """
+    data = request.get_json() or {}
+    
+    if 'lat' not in data or 'lng' not in data:
+        return jsonify({'message': 'lat and lng required'}), 400
+    
+    try:
+        patrol_lat = float(data['lat'])
+        patrol_lng = float(data['lng'])
+    except Exception:
+        return jsonify({'message': 'lat/lng must be numbers'}), 400
+    
+    current_time = datetime.now(timezone.utc)
+    
+    # Update patrol's last location
+    users_col.update_one(
+        {'phone': current_user['phone']},
+        {'$set': {
+            'last_location': {
+                'lat': patrol_lat,
+                'lng': patrol_lng,
+                'updated_at': current_time.isoformat()
+            }
+        }}
+    )
+    
+    # Notify admins of location update
+    socketio.emit('patrol_location_updated', {
+        'patrol_phone': current_user['phone'],
+        'patrol_name': current_user.get('name'),
+        'lat': patrol_lat,
+        'lng': patrol_lng,
+        'updated_at': current_time.isoformat()
+    }, room='admins')
+    
+    return jsonify({'message': 'Location updated'}), 200
+
+
+# --------- FEATURE 2: Patrol Status Update ----------
+@app.route('/api/alerts/<alert_id>/status', methods=['PUT'])
+@token_required
+@role_required(['patrol'])
+def update_patrol_status(current_user, alert_id):
+    """
+    Patrol updates their status on an alert.
+    States: assigned → on_way → checking → in_progress → resolved
+    """
+    data = request.get_json() or {}
+    new_status = data.get('patrol_status')
+    
+    valid_statuses = ['assigned', 'on_way', 'checking', 'in_progress', 'resolved']
+    if not new_status or new_status not in valid_statuses:
+        return jsonify({'message': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}), 400
+    
+    current_time = datetime.now(timezone.utc)
+    
+    # Update alert status
+    alert_update = {
+        'patrol_status': new_status,
+        'patrol_status_updated_at': current_time.isoformat()
+    }
+    
+    # If resolved, mark alert as handled and free up patrol
+    if new_status == 'resolved':
+        alert_update['status'] = 'handled'
+        alert_update['handled_by'] = current_user.get('phone')
+        alert_update['handled_at'] = current_time.isoformat()
+        
+        # Free up the patrol
+        users_col.update_one(
+            {'phone': current_user['phone']},
+            {'$set': {
+                'patrol_status': 'available',
+                'current_alert_id': None
+            }}
+        )
+    
+    result = alerts_col.update_one(
+        alert_lookup_query(alert_id),
+        {'$set': alert_update}
+    )
+    
+    if result.matched_count == 0:
+        return jsonify({'message': 'Alert not found'}), 404
+    
+    # Broadcast status update to all connected clients
+    socketio.emit('alert_status_updated', {
+        'alert_id': str(alert_id),
+        'patrol_status': new_status,
+        'patrol_phone': current_user['phone'],
+        'patrol_name': current_user.get('name'),
+        'status': alert_update.get('status', 'active'),
+        'handled_by': alert_update.get('handled_by'),
+        'handled_at': alert_update.get('handled_at'),
+        'updated_at': current_time.isoformat()
+    }, room=['patrols', 'admins'])
+    
+    return jsonify({'message': f'Alert status updated to {new_status}'}), 200
+
+
+# --------- FEATURE 3: Admin Alert Reassignment ----------
+@app.route('/api/alerts/<alert_id>/reassign', methods=['PUT'])
+@token_required
+@role_required(['admin'])
+def reassign_alert(current_user, alert_id):
+    """
+    Admin manually reassigns an alert to a specific patrol or uses auto-assign.
+    """
+    data = request.get_json() or {}
+    target_patrol_phone = data.get('patrol_phone')
+    reason = data.get('reason', 'admin_reassignment')
+    
+    # Get the alert first
+    alert = alerts_col.find_one(alert_lookup_query(alert_id))
+    if not alert:
+        return jsonify({'message': 'Alert not found'}), 404
+    
+    current_time = datetime.now(timezone.utc)
+    admin_phone = current_user.get('phone')
+    crime_lat = alert.get('crime_lat')
+    crime_lng = alert.get('crime_lng')
+    
+    # If no patrol specified, try auto-assign
+    if not target_patrol_phone:
+        patrol, distance = find_nearest_available_patrol(crime_lat, crime_lng, radius_km=5.0)
+        if not patrol:
+            return jsonify({'message': 'No available patrols within 5km'}), 400
+        target_patrol_phone = patrol['phone']
+        distance_km = distance
+    else:
+        # Validate target patrol exists
+        target_patrol = users_col.find_one({'phone': target_patrol_phone, 'role': 'patrol'})
+        if not target_patrol:
+            return jsonify({'message': f'Patrol {target_patrol_phone} not found'}), 404
+        
+        # Calculate distance if patrol has location
+        if target_patrol.get('last_location'):
+            patrol_lat = float(target_patrol['last_location']['lat'])
+            patrol_lng = float(target_patrol['last_location']['lng'])
+            distance_km = haversine_km(crime_lat, crime_lng, patrol_lat, patrol_lng)
+        else:
+            distance_km = 0
+    
+    # If there was an old assignment, free up that patrol
+    old_patrol_phone = alert.get('assigned_to')
+    if old_patrol_phone and old_patrol_phone != target_patrol_phone:
+        users_col.update_one(
+            {'phone': old_patrol_phone},
+            {'$set': {
+                'patrol_status': 'available',
+                'current_alert_id': None
+            }}
+        )
+        
+        # Notify old patrol of unassignment
+        socketio.emit('alert_unassigned', {
+            'alert_id': str(alert_id),
+            'reason': 'reassigned_by_admin'
+        }, room=f'patrol_{old_patrol_phone}')
+    
+    # Record assignment history
+    assignment_record = {
+        'patrol_phone': target_patrol_phone,
+        'assigned_at': current_time.isoformat(),
+        'assigned_by': admin_phone,
+        'distance_km': round(distance_km, 2),
+        'reason': reason
+    }
+    
+    eta_minutes = int(distance_km * 3) if distance_km else 0
+    
+    # Update alert with new assignment
+    alerts_col.update_one(
+        {'_id': alert['_id']},
+        {'$set': {
+            'assigned_to': target_patrol_phone,
+            'assigned_at': current_time.isoformat(),
+            'patrol_status': 'assigned',
+            'patrol_eta_minutes': eta_minutes,
+            'distance_to_assigned_patrol_km': round(distance_km, 2)
+        },
+        '$push': {
+            'assignment_history': assignment_record
+        }}
+    )
+    
+    # Update new patrol status
+    users_col.update_one(
+        {'phone': target_patrol_phone},
+        {'$set': {
+            'patrol_status': 'on_alert',
+            'current_alert_id': str(alert['_id'])
+        }}
+    )
+    
+    # Notify new patrol
+    socketio.emit('alert_assigned_to_you', {
+        'alert_id': str(alert['_id']),
+        'crime_type': alert.get('crime_type'),
+        'location': alert.get('location'),
+        'message': alert.get('message'),
+        'crime_lat': crime_lat,
+        'crime_lng': crime_lng,
+        'distance_km': round(distance_km, 2),
+        'eta_minutes': eta_minutes,
+        'reason': 'reassigned_by_admin',
+        'assigned_at': current_time.isoformat()
+    }, room=f'patrol_{target_patrol_phone}')
+    
+    # Notify all admins
+    socketio.emit('alert_reassigned', {
+        'alert_id': str(alert['_id']),
+        'old_patrol_phone': old_patrol_phone,
+        'new_patrol_phone': target_patrol_phone,
+        'distance_km': round(distance_km, 2),
+        'eta_minutes': eta_minutes,
+        'reason': reason,
+        'reassigned_by': admin_phone,
+        'reassigned_at': current_time.isoformat()
+    }, room='admins')
+    
+    return jsonify({
+        'message': f'Alert reassigned to patrol {target_patrol_phone}',
+        'patrol_phone': target_patrol_phone,
+        'distance_km': round(distance_km, 2),
+        'eta_minutes': eta_minutes
+    }), 200
+
+
 # ---------------------- Socket.IO ---------------------
 @socketio.on('connect')
 def handle_connect(auth):
@@ -1293,3 +1667,6 @@ if __name__ == '__main__':
         port=5000,
         debug=False
     )
+
+
+

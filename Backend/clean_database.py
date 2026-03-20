@@ -4,8 +4,8 @@ Clean CrimeSpot database - Remove all users and alerts
 """
 from pymongo import MongoClient
 
-MONGO_URI = "mongodb+srv://poseidon2005:Sathiya007@crime-cluster.qmgnmfw.mongodb.net/?retryWrites=true&w=majority&appName=crime-cluster"
-client = MongoClient(MONGO_URI, tls=True)
+MONGO_URI = "mongodb+srv://poseidon2005:Sathiya007@crime-cluster.qmgnmfw.mongodb.net/CrimeSpot?retryWrites=true&w=majority&appName=crime-cluster"
+client = MongoClient(MONGO_URI)
 db = client['CrimeSpot']
 
 users_col = db['users']

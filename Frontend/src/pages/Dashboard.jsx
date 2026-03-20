@@ -65,6 +65,8 @@ const Dashboard = ({ setAuthState }) => {
   const [crimeForm, setCrimeForm] = useState(initialCrimeForm);
   const [userForm, setUserForm] = useState(initialUserForm);
   const [alertForm, setAlertForm] = useState(initialAlertForm);
+  const [reassignModal, setReassignModal] = useState({ show: false, alertId: null, selectedPatrol: '' });
+  const [reassigning, setReassigning] = useState(false);
 
   const loadData = async () => {
     try {
@@ -249,7 +251,26 @@ const Dashboard = ({ setAuthState }) => {
     }
     window.location.href = `tel:${sanitizedPhone}`;
   };
+  const handleReassign = async () => {
+    if (!reassignModal.alertId) return;
+    
+    try {
+      setReassigning(true);
+      await API.put(`/api/alerts/${reassignModal.alertId}/reassign`, {
+        patrol_phone: reassignModal.selectedPatrol || null,
+        reason: 'admin_reassignment',
+      });
+      
+      loadData();
+      setReassignModal({ show: false, alertId: null, selectedPatrol: '' });
+    } catch (err) {
+      window.alert(err?.response?.data?.message || 'Failed to reassign alert');
+    } finally {
+      setReassigning(false);
+    }
+  };
 
+  const getPatrolUsers = () => users.filter((u) => u.role === 'patrol');
   const overviewMarkers = useMemo(() => {
     const crimeMarkers = crimes
       .filter((crime) => crime.lat != null && crime.lng != null)
@@ -548,6 +569,14 @@ const Dashboard = ({ setAuthState }) => {
                   <p>{alertItem.location}</p>
                   <span>{alertItem.user || alertItem.user_name || 'Unknown user'}</span>
                   <small>Status: {alertItem.status || 'active'}</small>
+                  
+                  {alertItem.assigned_to && (
+                    <div style={{ marginTop: '8px', fontSize: '12px', color: '#666' }}>
+                      <p>Assigned to: <strong>{alertItem.assigned_to}</strong></p>
+                      {alertItem.patrol_eta_minutes && <p>ETA: {alertItem.patrol_eta_minutes} mins</p>}
+                      {alertItem.patrol_status && <p>Patrol Status: <strong>{alertItem.patrol_status}</strong></p>}
+                    </div>
+                  )}
                 </div>
                 <div className="action-row">
                   <button
@@ -573,9 +602,18 @@ const Dashboard = ({ setAuthState }) => {
                     Edit
                   </button>
                   {alertItem.status !== 'handled' ? (
-                    <button type="button" className="primary-button" onClick={() => markAlertHandled(alertItem._id)}>
-                      Handle
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={() => setReassignModal({ show: true, alertId: alertItem._id, selectedPatrol: alertItem.assigned_to || '' })}
+                      >
+                        {alertItem.assigned_to ? 'Reassign' : 'Assign'}
+                      </button>
+                      <button type="button" className="primary-button" onClick={() => markAlertHandled(alertItem._id)}>
+                        Handle
+                      </button>
+                    </>
                   ) : null}
                   <button type="button" className="ghost-button" onClick={() => callUser(alertItem.user)}>
                     Call
@@ -587,6 +625,87 @@ const Dashboard = ({ setAuthState }) => {
               </article>
             ))}
           </div>
+
+          {reassignModal.show && (
+            <div style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 1000,
+            }}>
+              <div style={{
+                backgroundColor: 'white',
+                borderRadius: '8px',
+                padding: '24px',
+                width: '90%',
+                maxWidth: '400px',
+                boxShadow: '0 10px 40px rgba(0, 0, 0, 0.3)',
+              }}>
+                <h3 style={{ marginTop: 0 }}>Reassign Alert</h3>
+                <p style={{ fontSize: '14px', color: '#666' }}>Select a patrol officer to assign this alert or auto-assign to nearest.</p>
+                
+                <select
+                  value={reassignModal.selectedPatrol}
+                  onChange={(e) => setReassignModal({ ...reassignModal, selectedPatrol: e.target.value })}
+                  style={{
+                    width: '100%',
+                    padding: '8px',
+                    marginBottom: '16px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '4px',
+                    fontSize: '14px',
+                  }}
+                >
+                  <option value="">Auto-assign to nearest patrol</option>
+                  {getPatrolUsers().map((patrol) => (
+                    <option key={patrol._id} value={patrol.phone}>
+                      {patrol.name || patrol.phone}
+                    </option>
+                  ))}
+                </select>
+
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={handleReassign}
+                    disabled={reassigning}
+                    style={{
+                      flex: 1,
+                      padding: '10px',
+                      backgroundColor: '#3b82f6',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: reassigning ? 'not-allowed' : 'pointer',
+                      opacity: reassigning ? 0.6 : 1,
+                    }}
+                  >
+                    {reassigning ? 'Assigning...' : 'Confirm'}
+                  </button>
+                  <button
+                    onClick={() => setReassignModal({ show: false, alertId: null, selectedPatrol: '' })}
+                    disabled={reassigning}
+                    style={{
+                      flex: 1,
+                      padding: '10px',
+                      backgroundColor: '#e5e7eb',
+                      color: '#374151',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: reassigning ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       )}
     </div>
