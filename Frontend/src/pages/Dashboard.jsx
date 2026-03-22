@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { MapContainer, Marker, Popup, TileLayer } from 'react-leaflet';
 import L from 'leaflet';
-import API from '../services/api';
-import { getName, getPhone, logout } from '../services/auth';
+import { io } from 'socket.io-client';
+import API, { API_BASE_URL } from '../services/api';
+import { getName, getPhone, logout, getToken } from '../services/auth';
 import { useNavigate } from 'react-router-dom';
 
 delete L.Icon.Default.prototype._getIconUrl;
@@ -92,6 +93,64 @@ const Dashboard = ({ setAuthState }) => {
 
   useEffect(() => {
     loadData();
+  }, []);
+
+  useEffect(() => {
+    const token = getToken();
+    if (!token) {
+      return undefined;
+    }
+
+    const socket = io(API_BASE_URL, {
+      auth: { token },
+    });
+
+    socket.on('connect', () => {
+      console.log('Admin dashboard connected to socket');
+    });
+
+    socket.on('alert_status_updated', (data) => {
+      console.log('Alert status updated:', data);
+      setAlerts((current) =>
+        current.map((alert) =>
+          alert._id === data.alert_id
+            ? { 
+                ...alert, 
+                patrol_status: data.patrol_status, 
+                status: data.status,
+                handled_by: data.handled_by,
+                handled_at: data.handled_at
+              }
+            : alert
+        )
+      );
+      // Show notification for status changes
+      if (data.patrol_status) {
+        const statusText = data.patrol_status.replace(/_/g, ' ').toUpperCase();
+        const notif = new Notification('Alert Status Update', {
+          body: `Patrol ${data.patrol_name || data.patrol_phone} is now: ${statusText}`,
+          tag: `alert-${data.alert_id}`,
+        });
+        setTimeout(() => notif.close(), 5000);
+      }
+    });
+
+    socket.on('alert_handled', (data) => {
+      setAlerts((current) =>
+        current.map((alert) =>
+          alert._id === data.alert_id
+            ? { ...alert, status: 'handled', handled_by: data.handled_by, handled_at: data.handled_at }
+            : alert
+        )
+      );
+      const notif = new Notification('Alert Handled', {
+        body: `${data.handled_by} has marked the alert as handled`,
+        tag: `alert-${data.alert_id}`,
+      });
+      setTimeout(() => notif.close(), 5000);
+    });
+
+    return () => socket.disconnect();
   }, []);
 
   const handleLogout = () => {
@@ -382,12 +441,12 @@ const Dashboard = ({ setAuthState }) => {
                 <p>Mirror the mobile admin crime editor on the web.</p>
               </div>
             </div>
-            <input placeholder="Location" value={crimeForm.location} onChange={(e) => setCrimeForm({ ...crimeForm, location: e.target.value })} required />
-            <input placeholder="Crime Type" value={crimeForm.type} onChange={(e) => setCrimeForm({ ...crimeForm, type: e.target.value })} required />
-            <input placeholder="Date" value={crimeForm.date} onChange={(e) => setCrimeForm({ ...crimeForm, date: e.target.value })} required />
+            <input placeholder="Location" value={crimeForm.location} onChange={(e) => setCrimeForm({ ...crimeForm, location: e.target.value.replace(/[^a-zA-Z0-9\s,.-]/g, '') })} required />
+            <input placeholder="Crime Type" value={crimeForm.type} onChange={(e) => setCrimeForm({ ...crimeForm, type: e.target.value.replace(/[^a-zA-Z0-9\s-]/g, '') })} required />
+            <input placeholder="Date (YYYY-MM-DD)" value={crimeForm.date} onChange={(e) => setCrimeForm({ ...crimeForm, date: e.target.value.replace(/[^0-9-]/g, '') })} required />
             <div className="split-inputs">
-              <input placeholder="Latitude" value={crimeForm.lat} onChange={(e) => setCrimeForm({ ...crimeForm, lat: e.target.value })} required />
-              <input placeholder="Longitude" value={crimeForm.lng} onChange={(e) => setCrimeForm({ ...crimeForm, lng: e.target.value })} required />
+              <input placeholder="Latitude" value={crimeForm.lat} onChange={(e) => setCrimeForm({ ...crimeForm, lat: e.target.value.replace(/[^0-9.\-]/g, '') })} required />
+              <input placeholder="Longitude" value={crimeForm.lng} onChange={(e) => setCrimeForm({ ...crimeForm, lng: e.target.value.replace(/[^0-9.\-]/g, '') })} required />
             </div>
             <div className="action-row">
               <button type="submit" className="primary-button">{crimeForm.id ? 'Update Crime' : 'Create Crime'}</button>
@@ -445,10 +504,10 @@ const Dashboard = ({ setAuthState }) => {
                 <p>Create and manage `user`, `patrol`, and `admin` roles.</p>
               </div>
             </div>
-            <input placeholder="Phone" value={userForm.phone} onChange={(e) => setUserForm({ ...userForm, phone: e.target.value })} required />
-            <input placeholder={userForm.id ? 'New Password (optional)' : 'Password'} value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} />
-            <input placeholder="Name" value={userForm.name} onChange={(e) => setUserForm({ ...userForm, name: e.target.value })} />
-            <input placeholder="Aadhar" value={userForm.aadhar} onChange={(e) => setUserForm({ ...userForm, aadhar: e.target.value })} required />
+            <input placeholder="Phone" value={userForm.phone} onChange={(e) => setUserForm({ ...userForm, phone: e.target.value.replace(/[^0-9]/g, '').slice(0, 10) })} maxLength="10" required />
+            <input placeholder="Password (8+ chars, uppercase, lowercase, number, special)" type="password" value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} />
+            <input placeholder="Name" value={userForm.name} onChange={(e) => setUserForm({ ...userForm, name: e.target.value.replace(/[^a-zA-Z0-9\s-]/g, '') })} />
+            <input placeholder="Aadhar (12 digits)" value={userForm.aadhar} onChange={(e) => setUserForm({ ...userForm, aadhar: e.target.value.replace(/[^0-9]/g, '').slice(0, 12) })} maxLength="12" required />
             <div className="role-picker">
               {['user', 'patrol', 'admin'].map((role) => (
                 <button
@@ -523,15 +582,15 @@ const Dashboard = ({ setAuthState }) => {
                 <p>Broadcast or update incidents the same way the mobile admin panel does.</p>
               </div>
             </div>
-            <input placeholder="User Phone" value={alertForm.user} onChange={(e) => setAlertForm({ ...alertForm, user: e.target.value })} />
-            <input placeholder="User Name" value={alertForm.user_name} onChange={(e) => setAlertForm({ ...alertForm, user_name: e.target.value })} />
-            <input placeholder="Aadhar" value={alertForm.aadhar} onChange={(e) => setAlertForm({ ...alertForm, aadhar: e.target.value })} />
-            <input placeholder="Crime Type" value={alertForm.crime_type} onChange={(e) => setAlertForm({ ...alertForm, crime_type: e.target.value })} required />
-            <input placeholder="Location" value={alertForm.location} onChange={(e) => setAlertForm({ ...alertForm, location: e.target.value })} required />
+            <input placeholder="User Phone (10 digits)" value={alertForm.user} onChange={(e) => setAlertForm({ ...alertForm, user: e.target.value.replace(/[^0-9]/g, '').slice(0, 10) })} maxLength="10" />
+            <input placeholder="User Name" value={alertForm.user_name} onChange={(e) => setAlertForm({ ...alertForm, user_name: e.target.value.replace(/[^a-zA-Z0-9\s-]/g, '') })} />
+            <input placeholder="Aadhar (12 digits)" value={alertForm.aadhar} onChange={(e) => setAlertForm({ ...alertForm, aadhar: e.target.value.replace(/[^0-9]/g, '').slice(0, 12) })} maxLength="12" />
+            <input placeholder="Crime Type" value={alertForm.crime_type} onChange={(e) => setAlertForm({ ...alertForm, crime_type: e.target.value.replace(/[^a-zA-Z0-9\s-]/g, '') })} required />
+            <input placeholder="Location" value={alertForm.location} onChange={(e) => setAlertForm({ ...alertForm, location: e.target.value.replace(/[^a-zA-Z0-9\s,.-]/g, '') })} required />
             <textarea placeholder="Message" value={alertForm.message} onChange={(e) => setAlertForm({ ...alertForm, message: e.target.value })} rows={4} />
             <div className="split-inputs">
-              <input placeholder="Crime Latitude" value={alertForm.crime_lat} onChange={(e) => setAlertForm({ ...alertForm, crime_lat: e.target.value })} />
-              <input placeholder="Crime Longitude" value={alertForm.crime_lng} onChange={(e) => setAlertForm({ ...alertForm, crime_lng: e.target.value })} />
+              <input placeholder="Crime Latitude" value={alertForm.crime_lat} onChange={(e) => setAlertForm({ ...alertForm, crime_lat: e.target.value.replace(/[^0-9.\-]/g, '') })} />
+              <input placeholder="Crime Longitude" value={alertForm.crime_lng} onChange={(e) => setAlertForm({ ...alertForm, crime_lng: e.target.value.replace(/[^0-9.\-]/g, '') })} />
             </div>
             <div className="split-inputs">
               <input placeholder="User Latitude" value={alertForm.user_lat} onChange={(e) => setAlertForm({ ...alertForm, user_lat: e.target.value })} />

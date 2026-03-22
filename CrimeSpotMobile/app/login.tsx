@@ -5,6 +5,41 @@ import * as SecureStore from 'expo-secure-store';
 import { useRouter } from 'expo-router';
 import { BACKEND_URL } from '@/constants/api';
 
+const validatePhoneInput = (value: string) => {
+  return value.replace(/[^0-9]/g, '').slice(0, 10);
+};
+
+const validatePasswordInput = (value: string) => {
+  return value;
+};
+
+const validatePassword = (password: string) => {
+  const hasMinLength = password.length >= 8;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+
+  return {
+    isValid: hasMinLength && hasUpperCase && hasLowerCase && hasNumber && hasSpecialChar,
+    errors: [
+      !hasMinLength && 'Minimum 8 characters',
+      !hasUpperCase && 'At least 1 uppercase letter',
+      !hasLowerCase && 'At least 1 lowercase letter',
+      !hasNumber && 'At least 1 number',
+      !hasSpecialChar && 'At least 1 special character (!@#$%^&*)',
+    ].filter(Boolean) as string[],
+  };
+};
+
+const validateNameInput = (value: string) => {
+  return value.replace(/[^a-zA-Z0-9\s-]/g, '');
+};
+
+const validateAadharInput = (value: string) => {
+  return value.replace(/[^0-9]/g, '').slice(0, 12);
+};
+
 export default function Login() {
   const [phone, setPhone] = useState<string>('');
   const [password, setPassword] = useState<string>('');
@@ -14,6 +49,7 @@ export default function Login() {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string[]>([]);
   const router = useRouter();
 
   const handleAuth = async () => {
@@ -22,8 +58,23 @@ export default function Login() {
       return;
     }
 
+    if (phone.length !== 10) {
+      Alert.alert('Error', 'Phone number must be exactly 10 digits');
+      return;
+    }
+
     if (!isLogin && !aadhar) {
       Alert.alert('Error', 'Please enter aadhar for registration');
+      return;
+    }
+
+    if (!isLogin && aadhar.length !== 12) {
+      Alert.alert('Error', 'Aadhar must be exactly 12 digits');
+      return;
+    }
+
+    if (!validatePassword(password).isValid) {
+      Alert.alert('Weak Password', 'Password must have: 8+ chars, uppercase, lowercase, number, special char (!@#$%^&*)');
       return;
     }
 
@@ -65,6 +116,16 @@ export default function Login() {
     }
   };
 
+  const handlePasswordChange = (value: string) => {
+    setPassword(value);
+    if (!isLogin && value) {
+      const validation = validatePassword(value);
+      setPasswordError(validation.errors);
+    } else {
+      setPasswordError([]);
+    }
+  };
+
   return (
     <KeyboardAvoidingView behavior="padding" style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
@@ -81,9 +142,10 @@ export default function Login() {
               placeholder="9876543210"
               placeholderTextColor="#64748b"
               value={phone}
-              onChangeText={setPhone}
+              onChangeText={(value) => setPhone(validatePhoneInput(value))}
               keyboardType="phone-pad"
               editable={!loading}
+              maxLength={10}
             />
           </View>
 
@@ -92,11 +154,11 @@ export default function Login() {
             <View style={styles.passwordContainer}>
               <TextInput
                 style={styles.passwordInput}
-                placeholder="Enter password"
+                placeholder="Min 8 chars: uppercase, lowercase, number, special"
                 placeholderTextColor="#64748b"
                 secureTextEntry={!showPassword}
                 value={password}
-                onChangeText={setPassword}
+                onChangeText={handlePasswordChange}
                 editable={!loading}
               />
               <TouchableOpacity
@@ -131,7 +193,7 @@ export default function Login() {
                   placeholder="Your name"
                   placeholderTextColor="#64748b"
                   value={name}
-                  onChangeText={setName}
+                  onChangeText={(value) => setName(value.replace(/[^a-zA-Z\s-]/g, ''))}
                   editable={!loading}
                 />
               </View>

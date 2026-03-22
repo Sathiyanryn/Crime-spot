@@ -4,7 +4,7 @@
  */
 
 // ⚙️ UPDATE THIS SINGLE URL FOR ALL NETWORK CHANGES
-export const BACKEND_URL = 'http://10.199.107.28:5000';
+export const BACKEND_URL = 'http://192.168.1.5:5000';
 
 // API Endpoints
 export const API_ENDPOINTS = {
@@ -31,6 +31,7 @@ export const API_ENDPOINTS = {
   ALERT_UPDATE: (alertId: string) => `${BACKEND_URL}/api/alerts/${alertId}`,
   ALERT_MARK_HANDLED: (alertId: string) => `${BACKEND_URL}/api/alert/${alertId}/mark-handled`,
   ALERT_DELETE: (alertId: string) => `${BACKEND_URL}/api/alerts/${alertId}`,
+  ALERT_REASSIGN: (alertId: string) => `${BACKEND_URL}/api/alerts/${alertId}/reassign`,
 
   // Users
   USERS: `${BACKEND_URL}/api/users`,

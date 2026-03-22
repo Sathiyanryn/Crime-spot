@@ -13,12 +13,20 @@ import * as SecureStore from 'expo-secure-store';
 import { useRouter } from 'expo-router';
 import axios from 'axios';
 import { Linking } from 'react-native';
+import { io, Socket } from 'socket.io-client';
 import DashboardMapCard, { MapMarker } from '@/components/dashboard-map-card';
-import { API_ENDPOINTS } from '@/constants/api';
+import { API_ENDPOINTS, BACKEND_URL } from '@/constants/api';
 
 type Role = 'user' | 'patrol' | 'admin';
 type AdminTab = 'overview' | 'crimes' | 'users' | 'alerts';
 type AlertStatus = 'active' | 'handled';
+
+interface AssignModal {
+  show: boolean;
+  alertId: string | null;
+  selectedPatrol: string;
+  isAssigning: boolean;
+}
 
 interface Crime {
   _id: string;
@@ -101,6 +109,51 @@ const toNumberOrUndefined = (value: string) => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
+const validatePhoneInput = (value: string) => {
+  return value.replace(/[^0-9]/g, '').slice(0, 10);
+};
+
+const validatePasswordInput = (value: string) => {
+  return value;
+};
+
+const validatePassword = (password: string) => {
+  const hasMinLength = password.length >= 8;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+
+  return {
+    isValid: hasMinLength && hasUpperCase && hasLowerCase && hasNumber && hasSpecialChar,
+    message: `Password must have: 8+ chars, uppercase, lowercase, number, special char (!@#$%^&*)`
+  };
+};
+
+const validateNameInput = (value: string) => {
+  return value.replace(/[^a-zA-Z0-9\s-]/g, '');
+};
+
+const validateNumericInput = (value: string) => {
+  return value.replace(/[^0-9]/g, '');
+};
+
+const validateAadharInput = (value: string) => {
+  return value.replace(/[^0-9]/g, '').slice(0, 12);
+};
+
+const validateLocationInput = (value: string) => {
+  return value.replace(/[^a-zA-Z0-9\s,.-]/g, '');
+};
+
+const validateCrimeTypeInput = (value: string) => {
+  return value.replace(/[^a-zA-Z0-9\s-]/g, '');
+};
+
+const validateCoordinateInput = (value: string) => {
+  return value.replace(/[^0-9.\-]/g, '');
+};
+
 export default function AdminDashboard() {
   const router = useRouter();
   const [selectedTab, setSelectedTab] = useState<AdminTab>('overview');
@@ -112,9 +165,89 @@ export default function AdminDashboard() {
   const [crimeForm, setCrimeForm] = useState(emptyCrimeForm);
   const [userForm, setUserForm] = useState(emptyUserForm);
   const [alertForm, setAlertForm] = useState(emptyAlertForm);
+  const [assignModal, setAssignModal] = useState<AssignModal>({
+    show: false,
+    alertId: null,
+    selectedPatrol: '',
+    isAssigning: false,
+  });
+  const [passwordError, setPasswordError] = useState<string>('');
 
   useEffect(() => {
     loadData();
+  }, []);
+
+  useEffect(() => {
+    const setupSocket = async () => {
+      const storedToken = await SecureStore.getItemAsync('token');
+      if (!storedToken) {
+        return;
+      }
+
+      const socket: Socket = io(BACKEND_URL, {
+        auth: { token: storedToken },
+      });
+
+      socket.on('connect', () => {
+        console.log('Admin dashboard connected to socket');
+      });
+
+      socket.on('alert_status_updated', (data) => {
+        console.log('Alert status updated:', data);
+        setAlerts((current) =>
+          current.map((alert) =>
+            alert._id === data.alert_id
+              ? {
+                  ...alert,
+                  patrol_status: data.patrol_status,
+                  status: data.status,
+                  handled_by: data.handled_by,
+                  handled_at: data.handled_at,
+                }
+              : alert
+          )
+        );
+        
+        // Show alert notification for patrol status changes
+        if (data.patrol_status) {
+          const statusText = data.patrol_status.replace(/_/g, ' ').toUpperCase();
+          const patrolName = data.patrol_name || data.patrol_phone;
+          Alert.alert(
+            'Patrol Status Update',
+            `${patrolName} is now: ${statusText}`,
+            [{ text: 'OK', onPress: () => {} }]
+          );
+        }
+      });
+
+      socket.on('alert_handled', (data) => {
+        setAlerts((current) =>
+          current.map((alert) =>
+            alert._id === data.alert_id
+              ? { ...alert, status: 'handled', handled_by: data.handled_by, handled_at: data.handled_at }
+              : alert
+          )
+        );
+        
+        // Show alert notification for handled status
+        Alert.alert(
+          'Alert Handled',
+          `${data.handled_by} has marked the alert as handled`,
+          [{ text: 'OK', onPress: () => {} }]
+        );
+      });
+
+      return () => {
+        socket.disconnect();
+      };
+    };
+
+    const cleanup = setupSocket();
+    return () => {
+      if (cleanup instanceof Promise) {
+        cleanup.then((disconnect) => disconnect?.());
+      }
+    };
   }, []);
 
   const authHeaders = () => ({
@@ -216,8 +349,23 @@ export default function AdminDashboard() {
       return;
     }
 
+    if (userForm.phone.length !== 10) {
+      Alert.alert('Invalid Phone', 'Phone number must be exactly 10 digits.');
+      return;
+    }
+
+    if (userForm.aadhar.length !== 12) {
+      Alert.alert('Invalid Aadhar', 'Aadhar must be exactly 12 digits.');
+      return;
+    }
+
     if (!userForm.id && !userForm.password) {
       Alert.alert('Missing Password', 'Set a password for new users.');
+      return;
+    }
+
+    if (userForm.password && !validatePassword(userForm.password).isValid) {
+      Alert.alert('Weak Password', validatePassword(userForm.password).message);
       return;
     }
 
@@ -339,6 +487,37 @@ export default function AdminDashboard() {
     Linking.openURL(`tel:${sanitizedNumber}`);
   };
 
+  const getPatrolUsers = () => {
+    return users.filter((user) => user.role === 'patrol');
+  };
+
+  const handleReassign = async () => {
+    if (!assignModal.alertId) return;
+
+    try {
+      setAssignModal((prev) => ({ ...prev, isAssigning: true }));
+      await axios.put(
+        API_ENDPOINTS.ALERT_REASSIGN(assignModal.alertId!),
+        {
+          patrol_phone: assignModal.selectedPatrol || null,
+          reason: 'admin_assignment',
+        },
+        { headers: authHeaders() }
+      );
+
+      Alert.alert('Success', 'Alert assigned successfully');
+      setAssignModal({ show: false, alertId: null, selectedPatrol: '', isAssigning: false });
+      await loadData();
+    } catch (error: any) {
+      Alert.alert(
+        'Error',
+        error?.response?.data?.message || 'Failed to assign alert'
+      );
+    } finally {
+      setAssignModal((prev) => ({ ...prev, isAssigning: false }));
+    }
+  };
+
   const handleLogout = async () => {
     await SecureStore.deleteItemAsync('token');
     await SecureStore.deleteItemAsync('role');
@@ -431,21 +610,21 @@ export default function AdminDashboard() {
           placeholder="Location"
           placeholderTextColor="#64748b"
           value={crimeForm.location}
-          onChangeText={(value) => setCrimeForm((current) => ({ ...current, location: value }))}
+          onChangeText={(value) => setCrimeForm((current) => ({ ...current, location: validateLocationInput(value) }))}
         />
         <TextInput
           style={styles.input}
           placeholder="Crime Type"
           placeholderTextColor="#64748b"
           value={crimeForm.type}
-          onChangeText={(value) => setCrimeForm((current) => ({ ...current, type: value }))}
+          onChangeText={(value) => setCrimeForm((current) => ({ ...current, type: validateCrimeTypeInput(value) }))}
         />
         <TextInput
           style={styles.input}
-          placeholder="Date"
+          placeholder="Date (YYYY-MM-DD)"
           placeholderTextColor="#64748b"
           value={crimeForm.date}
-          onChangeText={(value) => setCrimeForm((current) => ({ ...current, date: value }))}
+          onChangeText={(value) => setCrimeForm((current) => ({ ...current, date: value.replace(/[^0-9-]/g, '') }))}
         />
         <View style={styles.row}>
           <TextInput
@@ -453,7 +632,7 @@ export default function AdminDashboard() {
             placeholder="Latitude"
             placeholderTextColor="#64748b"
             value={crimeForm.lat}
-            onChangeText={(value) => setCrimeForm((current) => ({ ...current, lat: value }))}
+            onChangeText={(value) => setCrimeForm((current) => ({ ...current, lat: validateCoordinateInput(value) }))}
             keyboardType="numeric"
           />
           <TextInput
@@ -461,7 +640,7 @@ export default function AdminDashboard() {
             placeholder="Longitude"
             placeholderTextColor="#64748b"
             value={crimeForm.lng}
-            onChangeText={(value) => setCrimeForm((current) => ({ ...current, lng: value }))}
+            onChangeText={(value) => setCrimeForm((current) => ({ ...current, lng: validateCoordinateInput(value) }))}
             keyboardType="numeric"
           />
         </View>
@@ -518,8 +697,9 @@ export default function AdminDashboard() {
           placeholder="Phone"
           placeholderTextColor="#64748b"
           value={userForm.phone}
-          onChangeText={(value) => setUserForm((current) => ({ ...current, phone: value }))}
+          onChangeText={(value) => setUserForm((current) => ({ ...current, phone: validatePhoneInput(value) }))}
           keyboardType="phone-pad"
+          maxLength={10}
         />
         <TextInput
           style={styles.input}
@@ -534,15 +714,16 @@ export default function AdminDashboard() {
           placeholder="Name"
           placeholderTextColor="#64748b"
           value={userForm.name}
-          onChangeText={(value) => setUserForm((current) => ({ ...current, name: value }))}
+          onChangeText={(value) => setUserForm((current) => ({ ...current, name: validateNameInput(value) }))}
         />
         <TextInput
           style={styles.input}
           placeholder="Aadhar"
           placeholderTextColor="#64748b"
           value={userForm.aadhar}
-          onChangeText={(value) => setUserForm((current) => ({ ...current, aadhar: value }))}
+          onChangeText={(value) => setUserForm((current) => ({ ...current, aadhar: validateAadharInput(value) }))}
           keyboardType="numeric"
+          maxLength={12}
         />
         <View style={styles.roleRow}>
           {(['user', 'patrol', 'admin'] as Role[]).map((role) => (
@@ -612,31 +793,33 @@ export default function AdminDashboard() {
         <Text style={styles.sectionTitle}>{alertForm.id ? 'Edit Alert' : 'Create Alert'}</Text>
         <TextInput
           style={styles.input}
-          placeholder="User Phone"
+          placeholder="User Phone (10 digits)"
           placeholderTextColor="#64748b"
           value={alertForm.user}
-          onChangeText={(value) => setAlertForm((current) => ({ ...current, user: value }))}
+          onChangeText={(value) => setAlertForm((current) => ({ ...current, user: validatePhoneInput(value) }))}
+          keyboardType="phone-pad"
+          maxLength={10}
         />
         <TextInput
           style={styles.input}
           placeholder="User Name"
           placeholderTextColor="#64748b"
           value={alertForm.user_name}
-          onChangeText={(value) => setAlertForm((current) => ({ ...current, user_name: value }))}
+          onChangeText={(value) => setAlertForm((current) => ({ ...current, user_name: validateNameInput(value) }))}
         />
         <TextInput
           style={styles.input}
           placeholder="Crime Type"
           placeholderTextColor="#64748b"
           value={alertForm.crime_type}
-          onChangeText={(value) => setAlertForm((current) => ({ ...current, crime_type: value }))}
+          onChangeText={(value) => setAlertForm((current) => ({ ...current, crime_type: validateCrimeTypeInput(value) }))}
         />
         <TextInput
           style={styles.input}
           placeholder="Location"
           placeholderTextColor="#64748b"
           value={alertForm.location}
-          onChangeText={(value) => setAlertForm((current) => ({ ...current, location: value }))}
+          onChangeText={(value) => setAlertForm((current) => ({ ...current, location: validateLocationInput(value) }))}
         />
         <TextInput
           style={[styles.input, styles.multilineInput]}
@@ -652,7 +835,7 @@ export default function AdminDashboard() {
             placeholder="Crime Lat"
             placeholderTextColor="#64748b"
             value={alertForm.crime_lat}
-            onChangeText={(value) => setAlertForm((current) => ({ ...current, crime_lat: value }))}
+            onChangeText={(value) => setAlertForm((current) => ({ ...current, crime_lat: validateCoordinateInput(value) }))}
             keyboardType="numeric"
           />
           <TextInput
@@ -660,7 +843,7 @@ export default function AdminDashboard() {
             placeholder="Crime Lng"
             placeholderTextColor="#64748b"
             value={alertForm.crime_lng}
-            onChangeText={(value) => setAlertForm((current) => ({ ...current, crime_lng: value }))}
+            onChangeText={(value) => setAlertForm((current) => ({ ...current, crime_lng: validateCoordinateInput(value) }))}
             keyboardType="numeric"
           />
         </View>
@@ -670,7 +853,7 @@ export default function AdminDashboard() {
             placeholder="User Lat"
             placeholderTextColor="#64748b"
             value={alertForm.user_lat}
-            onChangeText={(value) => setAlertForm((current) => ({ ...current, user_lat: value }))}
+            onChangeText={(value) => setAlertForm((current) => ({ ...current, user_lat: validateCoordinateInput(value) }))}
             keyboardType="numeric"
           />
           <TextInput
@@ -678,7 +861,7 @@ export default function AdminDashboard() {
             placeholder="User Lng"
             placeholderTextColor="#64748b"
             value={alertForm.user_lng}
-            onChangeText={(value) => setAlertForm((current) => ({ ...current, user_lng: value }))}
+            onChangeText={(value) => setAlertForm((current) => ({ ...current, user_lng: validateCoordinateInput(value) }))}
             keyboardType="numeric"
           />
         </View>
@@ -744,12 +927,107 @@ export default function AdminDashboard() {
             <TouchableOpacity style={styles.smallAmberButton} onPress={() => callAlertUser(alertItem.user)}>
               <Text style={styles.smallButtonText}>Call</Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.smallOrangeButton}
+              onPress={() =>
+                setAssignModal({
+                  show: true,
+                  alertId: alertItem._id,
+                  selectedPatrol: '',
+                  isAssigning: false,
+                })
+              }
+            >
+              <Text style={styles.smallButtonText}>Assign</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={styles.smallRedButton} onPress={() => deleteAlert(alertItem)}>
               <Text style={styles.smallButtonText}>Delete</Text>
             </TouchableOpacity>
           </View>
         </View>
       ))}
+
+      {assignModal.show && (
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Assign Alert to Patrol</Text>
+            <Text style={styles.modalSubtitle}>
+              Select a patrol officer or auto-assign to nearest
+            </Text>
+
+            <View style={styles.pickerContainer}>
+              <ScrollView>
+                <TouchableOpacity
+                  style={[
+                    styles.patrolOption,
+                    assignModal.selectedPatrol === '' && styles.patrolOptionSelected,
+                  ]}
+                  onPress={() => setAssignModal((prev) => ({ ...prev, selectedPatrol: '' }))}
+                >
+                  <Text
+                    style={[
+                      styles.patrolOptionText,
+                      assignModal.selectedPatrol === '' && styles.patrolOptionTextSelected,
+                    ]}
+                  >
+                    Auto-assign to nearest patrol
+                  </Text>
+                </TouchableOpacity>
+                {getPatrolUsers().map((patrol) => (
+                  <TouchableOpacity
+                    key={patrol._id}
+                    style={[
+                      styles.patrolOption,
+                      assignModal.selectedPatrol === patrol.phone && styles.patrolOptionSelected,
+                    ]}
+                    onPress={() =>
+                      setAssignModal((prev) => ({ ...prev, selectedPatrol: patrol.phone }))
+                    }
+                  >
+                    <Text
+                      style={[
+                        styles.patrolOptionText,
+                        assignModal.selectedPatrol === patrol.phone && styles.patrolOptionTextSelected,
+                      ]}
+                    >
+                      {patrol.name || patrol.phone}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            <View style={styles.modalButtonRow}>
+              <TouchableOpacity
+                style={[
+                  styles.modalButton,
+                  styles.modalConfirmButton,
+                  assignModal.isAssigning && styles.modalButtonDisabled,
+                ]}
+                onPress={handleReassign}
+                disabled={assignModal.isAssigning}
+              >
+                <Text style={styles.modalButtonText}>
+                  {assignModal.isAssigning ? 'Assigning...' : 'Confirm'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalCancelButton]}
+                onPress={() =>
+                  setAssignModal({
+                    show: false,
+                    alertId: null,
+                    selectedPatrol: '',
+                    isAssigning: false,
+                  })
+                }
+              >
+                <Text style={styles.modalButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
     </View>
   );
 
@@ -1016,9 +1294,94 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 8,
   },
+  smallOrangeButton: {
+    backgroundColor: '#f97316',
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
   smallButtonText: {
     color: '#fff',
     fontSize: 12,
     fontWeight: '700',
+  },
+  modalOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000,
+  },
+  modalContent: {
+    backgroundColor: '#111827',
+    borderRadius: 14,
+    padding: 20,
+    width: '85%',
+    maxHeight: '70%',
+    borderWidth: 1,
+    borderColor: '#1f2937',
+  },
+  modalTitle: {
+    color: '#f8fafc',
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  modalSubtitle: {
+    color: '#94a3b8',
+    fontSize: 14,
+    marginBottom: 16,
+  },
+  pickerContainer: {
+    maxHeight: 250,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    borderRadius: 8,
+    backgroundColor: '#0f172a',
+  },
+  patrolOption: {
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1f2937',
+  },
+  patrolOptionSelected: {
+    backgroundColor: '#064e3b',
+  },
+  patrolOptionText: {
+    color: '#cbd5e1',
+    fontSize: 14,
+  },
+  patrolOptionTextSelected: {
+    color: '#10b981',
+    fontWeight: '700',
+  },
+  modalButtonRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  modalButton: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  modalConfirmButton: {
+    backgroundColor: '#3b82f6',
+  },
+  modalCancelButton: {
+    backgroundColor: '#6b7280',
+  },
+  modalButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  modalButtonDisabled: {
+    opacity: 0.6,
   },
 });
